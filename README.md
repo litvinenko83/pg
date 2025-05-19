@@ -1,12 +1,14 @@
 # pg
 ## полезные запросы Postgres
 
+
 ### Update JSON
 ```sql
 update the_table 
    set attr['is_default'] = to_jsonb(false); 
 ```
 *https://dba.stackexchange.com/questions/295298/how-to-update-a-property-value-of-a-jsonb-field*
+
 
 ### Поиск по тексту хранимых процедур и функций
 ```sql
@@ -21,6 +23,7 @@ JOIN
 WHERE 
     pp.prosrc ILIKE '%shkfor%'; 
 ```
+
 
 ### Table+Index size
 ```sql
@@ -65,6 +68,7 @@ pg_stat_all_tables.n_dead_tup >= autovacuum_vacuum_threshold + autovacuum_vacuum
 pg_stat_all_tables.n_mod_since_analyze >= autovacuum_analyze_threshold + autovacuum_analyze_scale_factor * pg_class.reltupes 
 ```
 
+
 ### Неиспользуемые индексы (с размерами) 
 
 ```sql
@@ -100,11 +104,7 @@ WHERE
 ORDER BY 
   pg_relation_size(indexrelid) DESC; 
 ```
- 
 
- 
-
- 
 
 ### блоат таблиц 
 
@@ -123,6 +123,7 @@ WHERE schemaname not in ('public')
 order by dead_tup_ratio desc NULLS LAST; 
 ```
 
+
 ### отвал сети вручную --закрывает все сессии 
 
 ```sql
@@ -131,6 +132,7 @@ SELECT PG_TERMINATE_BACKEND(pid)
   FROM pg_stat_activity   
 WHERE pid <> PG_BACKEND_PID(); 
 ```
+
 
 ### дерево блокировок 
 
@@ -152,6 +154,7 @@ from pg_catalog.pg_locks bdl
     on bga.pid = bgl.pid 
 where not bdl.granted 
 ```
+
 
 ### дерево ожидания блокировок 
 
@@ -216,7 +219,8 @@ select
   ) as query 
 from tree 
 order by top_blocker_pid, level, pid 
-``` 
+```
+
 
 ### Поиск индексов, не используемых ни на одной партиции таблицы
 
@@ -263,9 +267,7 @@ HAVING
 ORDER BY 
   total_index_size DESC; 
 ```
- 
 
- 
 
 ### блоат индексов 
 
@@ -373,12 +375,14 @@ WHERE ( bloat_pct > 50 and bloat_mb > 10 )
 ORDER BY bloat_pct DESC; 
 ```
 
+
 ### Размер WAL
 
 ```sql
 SELECT pg_size_pretty(SUM(size)) AS total_wal_size 
 FROM pg_ls_waldir();
 ```
+
 
 ### Отставание репликации
 
