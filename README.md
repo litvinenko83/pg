@@ -398,3 +398,13 @@ SELECT
 FROM
     pg_stat_replication;
 ```
+
+### Размер полей таблицы
+
+```sql
+SELECT
+    pg_size_pretty(SUM(pg_column_size(field1))) AS field1_total_size,
+    pg_size_pretty(SUM(pg_column_size(field2))) AS field2_total_size
+FROM
+    shemaname.tablename;
+```
