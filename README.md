@@ -375,6 +375,356 @@ WHERE ( bloat_pct > 50 and bloat_mb > 10 )
 ORDER BY bloat_pct DESC; 
 ```
 
+### Блоат таблиц
+
+```sql
+-- new table bloat query
+-- still needs work; is often off by +/- 20%
+WITH constants AS (
+    -- define some constants for sizes of things
+    -- for reference down the query and easy maintenance
+    SELECT current_setting('block_size')::numeric AS bs, 23 AS hdr, 8 AS ma
+),
+no_stats AS (
+    -- screen out table who have attributes
+    -- which dont have stats, such as JSON
+    SELECT table_schema, table_name, 
+        n_live_tup::numeric as est_rows,
+        pg_table_size(relid)::numeric as table_size
+    FROM information_schema.columns
+        JOIN pg_stat_user_tables as psut
+           ON table_schema = psut.schemaname
+           AND table_name = psut.relname
+        LEFT OUTER JOIN pg_stats
+        ON table_schema = pg_stats.schemaname
+            AND table_name = pg_stats.tablename
+            AND column_name = attname 
+    WHERE attname IS NULL
+        AND table_schema NOT IN ('pg_catalog', 'information_schema')
+    GROUP BY table_schema, table_name, relid, n_live_tup
+),
+null_headers AS (
+    -- calculate null header sizes
+    -- omitting tables which dont have complete stats
+    -- and attributes which aren't visible
+    SELECT
+        hdr+1+(sum(case when null_frac <> 0 THEN 1 else 0 END)/8) as nullhdr,
+        SUM((1-null_frac)*avg_width) as datawidth,
+        MAX(null_frac) as maxfracsum,
+        schemaname,
+        tablename,
+        hdr, ma, bs
+    FROM pg_stats CROSS JOIN constants
+        LEFT OUTER JOIN no_stats
+            ON schemaname = no_stats.table_schema
+            AND tablename = no_stats.table_name
+    WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+        AND no_stats.table_name IS NULL
+        AND EXISTS ( SELECT 1
+            FROM information_schema.columns
+                WHERE schemaname = columns.table_schema
+                    AND tablename = columns.table_name )
+    GROUP BY schemaname, tablename, hdr, ma, bs
+),
+data_headers AS (
+    -- estimate header and row size
+    SELECT
+        ma, bs, hdr, schemaname, tablename,
+        (datawidth+(hdr+ma-(case when hdr%ma=0 THEN ma ELSE hdr%ma END)))::numeric AS datahdr,
+        (maxfracsum*(nullhdr+ma-(case when nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2
+    FROM null_headers
+),
+table_estimates AS (
+    -- make estimates of how large the table should be
+    -- based on row and page size
+    SELECT schemaname, tablename, bs,
+        reltuples::numeric as est_rows, relpages * bs as table_bytes,
+    CEIL((reltuples*
+            (datahdr + nullhdr2 + 4 + ma -
+                (CASE WHEN datahdr%ma=0
+                    THEN ma ELSE datahdr%ma END)
+                )/(bs-20))) * bs AS expected_bytes,
+        reltoastrelid
+    FROM data_headers
+        JOIN pg_class ON tablename = relname
+        JOIN pg_namespace ON relnamespace = pg_namespace.oid
+            AND schemaname = nspname
+    WHERE pg_class.relkind = 'r'
+),
+estimates_with_toast AS (
+    -- add in estimated TOAST table sizes
+    -- estimate based on 4 toast tuples per page because we dont have 
+    -- anything better.  also append the no_data tables
+    SELECT schemaname, tablename, 
+        TRUE as can_estimate,
+        est_rows,
+        table_bytes + ( coalesce(toast.relpages, 0) * bs ) as table_bytes,
+        expected_bytes + ( ceil( coalesce(toast.reltuples, 0) / 4 ) * bs ) as expected_bytes
+    FROM table_estimates LEFT OUTER JOIN pg_class as toast
+        ON table_estimates.reltoastrelid = toast.oid
+            AND toast.relkind = 't'
+),
+table_estimates_plus AS (
+-- add some extra metadata to the table data
+-- and calculations to be reused
+-- including whether we cant estimate it
+-- or whether we think it might be compressed
+    SELECT current_database() as databasename,
+            schemaname, tablename, can_estimate, 
+            est_rows,
+            CASE WHEN table_bytes > 0
+                THEN table_bytes::NUMERIC
+                ELSE NULL::NUMERIC END
+                AS table_bytes,
+            CASE WHEN expected_bytes > 0 
+                THEN expected_bytes::NUMERIC
+                ELSE NULL::NUMERIC END
+                    AS expected_bytes,
+            CASE WHEN expected_bytes > 0 AND table_bytes > 0
+                AND expected_bytes <= table_bytes
+                THEN (table_bytes - expected_bytes)::NUMERIC
+                ELSE 0::NUMERIC END AS bloat_bytes
+    FROM estimates_with_toast
+    UNION ALL
+    SELECT current_database() as databasename, 
+        table_schema, table_name, FALSE, 
+        est_rows, table_size,
+        NULL::NUMERIC, NULL::NUMERIC
+    FROM no_stats
+),
+bloat_data AS (
+    -- do final math calculations and formatting
+    select current_database() as databasename,
+        schemaname, tablename, can_estimate, 
+        table_bytes, round(table_bytes/(1024^2)::NUMERIC,3) as table_mb,
+        expected_bytes, round(expected_bytes/(1024^2)::NUMERIC,3) as expected_mb,
+        round(bloat_bytes*100/table_bytes) as pct_bloat,
+        round(bloat_bytes/(1024::NUMERIC^2),2) as mb_bloat,
+        table_bytes, expected_bytes, est_rows
+    FROM table_estimates_plus
+)
+-- filter output for bloated tables
+SELECT databasename, schemaname, tablename,
+    can_estimate,
+    est_rows,
+    pct_bloat, mb_bloat,
+    table_mb
+FROM bloat_data
+-- this where clause defines which tables actually appear
+-- in the bloat chart
+-- example below filters for tables which are either 50%
+-- bloated and more than 20mb in size, or more than 25%
+-- bloated and more than 4GB in size
+WHERE ( pct_bloat >= 50 AND mb_bloat >= 10 )
+    OR ( pct_bloat >= 25 AND mb_bloat >= 1000 )
+ORDER BY mb_bloat DESC;
+```
+
+
+### Дубли индексов
+
+```sql
+SELECT ni.nspname || '.' || ct.relname AS "table", 
+       ci.relname AS "dup index",
+       pg_get_indexdef(i.indexrelid) AS "dup index definition", 
+       i.indkey AS "dup index attributes",
+       cii.relname AS "encompassing index", 
+       pg_get_indexdef(ii.indexrelid) AS "encompassing index definition",
+       ii.indkey AS "enc index attributes"
+  FROM pg_index i
+  JOIN pg_class ct ON i.indrelid=ct.oid
+  JOIN pg_class ci ON i.indexrelid=ci.oid
+  JOIN pg_namespace ni ON ci.relnamespace=ni.oid
+  JOIN pg_index ii ON ii.indrelid=i.indrelid AND
+                      ii.indexrelid != i.indexrelid AND
+                      (array_to_string(ii.indkey, ' ') || ' ') like (array_to_string(i.indkey, ' ') || ' %') AND
+                      (array_to_string(ii.indcollation, ' ')  || ' ') like (array_to_string(i.indcollation, ' ') || ' %') AND
+                      (array_to_string(ii.indclass, ' ')  || ' ') like (array_to_string(i.indclass, ' ') || ' %') AND
+                      (array_to_string(ii.indoption, ' ')  || ' ') like (array_to_string(i.indoption, ' ') || ' %') AND
+                      NOT (ii.indkey::integer[] @> ARRAY[0]) AND -- Remove if you want expression indexes (you probably don't)
+                      NOT (i.indkey::integer[] @> ARRAY[0]) AND -- Remove if you want expression indexes (you probably don't)
+                      i.indpred IS NULL AND -- Remove if you want indexes with predicates
+                      ii.indpred IS NULL AND -- Remove if you want indexes with predicates
+                      CASE WHEN i.indisunique THEN ii.indisunique AND
+                         array_to_string(ii.indkey, ' ') = array_to_string(i.indkey, ' ') ELSE true END
+  JOIN pg_class ctii ON ii.indrelid=ctii.oid
+  JOIN pg_class cii ON ii.indexrelid=cii.oid
+ WHERE ct.relname NOT LIKE 'pg_%' AND
+       NOT i.indisprimary
+ ORDER BY 1, 2, 3;
+```
+
+### Need Indexes
+
+```sql
+WITH 
+index_usage AS (
+    SELECT  sut.relid,
+            current_database() AS database,
+            sut.schemaname::text as schema_name, 
+            sut.relname::text AS table_name,
+            sut.seq_scan as table_scans,
+            sut.idx_scan as index_scans,
+            pg_total_relation_size(relid) as table_bytes,
+            round((sut.n_tup_ins + sut.n_tup_del + sut.n_tup_upd + sut.n_tup_hot_upd) / 
+                (seq_tup_read::NUMERIC + 2), 2) as writes_per_scan
+    FROM pg_stat_user_tables sut
+),
+index_counts AS (
+    SELECT sut.relid,
+        count(*) as index_count
+    FROM pg_stat_user_tables sut LEFT OUTER JOIN pg_indexes
+    ON sut.schemaname = pg_indexes.schemaname AND
+        sut.relname = pg_indexes.tablename
+    GROUP BY relid
+),
+too_many_tablescans AS (
+    SELECT 'many table scans'::TEXT as reason, 
+        database, schema_name, table_name,
+        table_scans, pg_size_pretty(table_bytes) as table_size,
+        writes_per_scan, index_count, table_bytes
+    FROM index_usage JOIN index_counts USING ( relid )
+    WHERE table_scans > 1000
+        AND table_scans > ( index_scans * 2 )
+        AND table_bytes > 32000000
+        AND writes_per_scan < ( 1.0 )
+    ORDER BY table_scans DESC
+),
+scans_no_index AS (
+    SELECT 'scans, few indexes'::TEXT as reason,
+        database, schema_name, table_name,
+        table_scans, pg_size_pretty(table_bytes) as table_size,
+        writes_per_scan, index_count, table_bytes
+    FROM index_usage JOIN index_counts USING ( relid )
+    WHERE table_scans > 100
+        AND table_scans > ( index_scans )
+        AND index_count < 2
+        AND table_bytes > 32000000   
+        AND writes_per_scan < ( 1.0 )
+    ORDER BY table_scans DESC
+),
+big_tables_with_scans AS (
+    SELECT 'big table scans'::TEXT as reason,
+        database, schema_name, table_name,
+        table_scans, pg_size_pretty(table_bytes) as table_size,
+        writes_per_scan, index_count, table_bytes
+    FROM index_usage JOIN index_counts USING ( relid )
+    WHERE table_scans > 100
+        AND table_scans > ( index_scans / 10 )
+        AND table_bytes > 1000000000  
+        AND writes_per_scan < ( 1.0 )
+    ORDER BY table_bytes DESC
+),
+scans_no_writes AS (
+    SELECT 'scans, no writes'::TEXT as reason,
+        database, schema_name, table_name,
+        table_scans, pg_size_pretty(table_bytes) as table_size,
+        writes_per_scan, index_count, table_bytes
+    FROM index_usage JOIN index_counts USING ( relid )
+    WHERE table_scans > 100
+        AND table_scans > ( index_scans / 4 )
+        AND table_bytes > 32000000   
+        AND writes_per_scan < ( 0.1 )
+    ORDER BY writes_per_scan ASC
+)
+SELECT reason, database, schema_name, table_name, table_scans, 
+    table_size, writes_per_scan, index_count
+FROM too_many_tablescans
+UNION ALL
+SELECT reason, database, schema_name, table_name, table_scans, 
+    table_size, writes_per_scan, index_count
+FROM scans_no_index
+UNION ALL
+SELECT reason, database, schema_name, table_name, table_scans, 
+    table_size, writes_per_scan, index_count
+FROM big_tables_with_scans
+UNION ALL
+SELECT reason, database, schema_name, table_name, table_scans, 
+    table_size, writes_per_scan, index_count
+FROM scans_no_writes;
+```
+
+### Unused Indexes
+
+```sql
+WITH table_scans as (
+    SELECT relid,
+        tables.idx_scan + tables.seq_scan as all_scans,
+        ( tables.n_tup_ins + tables.n_tup_upd + tables.n_tup_del ) as writes,
+                pg_relation_size(relid) as table_size
+        FROM pg_stat_user_tables as tables
+),
+all_writes as (
+    SELECT sum(writes) as total_writes
+    FROM table_scans
+),
+indexes as (
+    SELECT idx_stat.relid, idx_stat.indexrelid,
+        idx_stat.schemaname, idx_stat.relname as tablename,
+        idx_stat.indexrelname as indexname,
+        idx_stat.idx_scan,
+        pg_relation_size(idx_stat.indexrelid) as index_bytes,
+        indexdef ~* 'USING btree' AS idx_is_btree
+    FROM pg_stat_user_indexes as idx_stat
+        JOIN pg_index
+            USING (indexrelid)
+        JOIN pg_indexes as indexes
+            ON idx_stat.schemaname = indexes.schemaname
+                AND idx_stat.relname = indexes.tablename
+                AND idx_stat.indexrelname = indexes.indexname
+    WHERE pg_index.indisunique = FALSE
+),
+index_ratios AS (
+SELECT schemaname, tablename, indexname,
+    idx_scan, all_scans,
+    round(( CASE WHEN all_scans = 0 THEN 0.0::NUMERIC
+        ELSE idx_scan::NUMERIC/all_scans * 100 END),2) as index_scan_pct,
+    writes,
+    round((CASE WHEN writes = 0 THEN idx_scan::NUMERIC ELSE idx_scan::NUMERIC/writes END),2)
+        as scans_per_write,
+    pg_size_pretty(index_bytes) as index_size,
+    pg_size_pretty(table_size) as table_size,
+    idx_is_btree, index_bytes
+    FROM indexes
+    JOIN table_scans
+    USING (relid)
+),
+index_groups AS (
+SELECT 'Never Used Indexes' as reason, *, 1 as grp
+FROM index_ratios
+WHERE
+    idx_scan = 0
+    and idx_is_btree
+UNION ALL
+SELECT 'Low Scans, High Writes' as reason, *, 2 as grp
+FROM index_ratios
+WHERE
+    scans_per_write <= 1
+    and index_scan_pct < 10
+    and idx_scan > 0
+    and writes > 100
+    and idx_is_btree
+UNION ALL
+SELECT 'Seldom Used Large Indexes' as reason, *, 3 as grp
+FROM index_ratios
+WHERE
+    index_scan_pct < 5
+    and scans_per_write > 1
+    and idx_scan > 0
+    and idx_is_btree
+    and index_bytes > 100000000
+UNION ALL
+SELECT 'High-Write Large Non-Btree' as reason, index_ratios.*, 4 as grp 
+FROM index_ratios, all_writes
+WHERE
+    ( writes::NUMERIC / ( total_writes + 1 ) ) > 0.02
+    AND NOT idx_is_btree
+    AND index_bytes > 100000000
+ORDER BY grp, index_bytes DESC )
+SELECT reason, schemaname, tablename, indexname,
+    index_scan_pct, scans_per_write, index_size, table_size
+FROM index_groups;
+```
 
 ### Размер WAL
 
@@ -398,6 +748,7 @@ SELECT
 FROM
     pg_stat_replication;
 ```
+
 
 ### Размер полей таблицы
 
