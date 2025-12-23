@@ -3,6 +3,8 @@
 
 ### Проверка прогресса autovacuum
 
+https://github.com/lesovsky/uber-scripts/blob/master/postgresql/sql/vacuum_activity.sql
+
 ```sql
 SELECT
         p.pid,
