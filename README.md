@@ -37,10 +37,6 @@ ORDER BY now() - a.xact_start DESC;
 https://stackoverflow.com/questions/21546542/retrieve-a-progress-of-index-creation-process-in-postgresql
 
 ```sql
--- Source - https://stackoverflow.com/a/78640729
--- Posted by AdamPal, modified by community. See post 'Timeline' for change history
--- Retrieved 2026-02-20, License - CC BY-SA 4.0
-
 SELECT 
        clock_timestamp() - a.xact_start                          AS duration_so_far,
        coalesce(a.wait_event_type ||'.'|| a.wait_event, 'false') AS waiting,
