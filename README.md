@@ -1,6 +1,56 @@
 # pg
 ## полезные запросы Postgres
 
+
+### Сколько мертвых строк осталось до запуска следующего автовакуума
+
+```sql
+SELECT
+    stat.schemaname as "схема",
+    stat.relname AS "таблица",
+    stat.n_dead_tup::BIGINT as n_dead_tup,
+    stat.last_autovacuum as last_autovacuum,
+--    stat.last_vacuum,
+    stat.last_autoanalyze as last_autovacuum,
+--    stat.last_analyze,
+    cls.reltuples::BIGINT AS "оценка живых, строк",
+    current_setting('autovacuum_vacuum_threshold')::bigint AS autovacuum_vacuum_threshold,
+    current_setting('autovacuum_vacuum_scale_factor')::real AS autovacuum_vacuum_scale_factor,
+    (current_setting('autovacuum_vacuum_threshold')::bigint +
+     current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples) AS "пороговое значение, строк",
+    CASE
+        WHEN (current_setting('autovacuum_vacuum_threshold')::bigint +
+              current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples)::numeric > 0
+        THEN round((stat.n_dead_tup::numeric /
+                   (current_setting('autovacuum_vacuum_threshold')::bigint +
+                    current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples)::numeric) * 100, 2)
+        ELSE NULL
+    END AS "n_dead_tup % от порога, %",
+    GREATEST((current_setting('autovacuum_vacuum_threshold')::bigint +
+              current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples) - stat.n_dead_tup, 0) AS "до автовакуума мертвых строк осталось",
+    CASE
+        WHEN (current_setting('autovacuum_vacuum_threshold')::bigint +
+              current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples)::numeric > 0
+        THEN round(GREATEST(100 - (stat.n_dead_tup::numeric /
+                                  (current_setting('autovacuum_vacuum_threshold')::bigint +
+                                   current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples)::numeric) * 100, 0), 2)
+        ELSE NULL
+    END AS "остаток, процентов",
+    CASE
+        WHEN stat.n_dead_tup >= (current_setting('autovacuum_vacuum_threshold')::bigint +
+                                 current_setting('autovacuum_vacuum_scale_factor')::real * cls.reltuples)
+        THEN 'Yes'
+        ELSE 'No'
+    END AS "нужен автовакуум"
+FROM
+    pg_stat_all_tables stat
+JOIN
+    pg_class cls ON stat.relid = cls.oid
+WHERE
+    stat.schemaname = 'public';
+    --AND stat.relname = '';
+```
+
 ### Проверка прогресса autovacuum
 
 https://github.com/lesovsky/uber-scripts/blob/master/postgresql/sql/vacuum_activity.sql
