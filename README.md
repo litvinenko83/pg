@@ -2,6 +2,95 @@
 ## полезные запросы Postgres
 
 
+### максимальная скорость чтения с диска при AUTOVACUUM-ах, исходя из текущих настроек
+
+```sql
+--максимальная скорость чтения, исходя из текущих настроек
+WITH settings AS (
+    SELECT
+        (current_setting('block_size'))::int AS block_size,
+        (current_setting('autovacuum_vacuum_cost_limit'))::numeric AS cost_limit,
+        (current_setting('vacuum_cost_page_miss'))::numeric AS cost_page_miss,
+        substring(current_setting('autovacuum_vacuum_cost_delay') FROM '^(\d+(\.\d+)?)')::numeric AS cost_delay_ms
+)
+SELECT
+    block_size,
+    cost_limit,
+    cost_page_miss,
+    cost_delay_ms,
+
+    -- Скорость чтения (байт/с)
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            (cost_limit / cost_page_miss * block_size) / (cost_delay_ms / 1000)
+        ELSE NULL
+    END AS read_rate_bytes_per_sec,
+
+    -- Скорость чтения (МБ/с)
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            ((cost_limit / cost_page_miss * block_size) / (cost_delay_ms / 1000)) / (1024 * 1024)
+        ELSE NULL
+    END AS read_rate_mb_per_sec,
+
+    -- Текст формулы (с именами переменных)
+    '(cost_limit / cost_page_miss * block_size) / (cost_delay_ms / 1000)' AS formula_text,
+
+    -- Текст формулы с подставленными значениями
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            '(' || cost_limit || ' / ' || cost_page_miss || ' * ' || block_size || ') / (' || cost_delay_ms || ' / 1000)'
+        ELSE
+            'cost_delay_ms <= 0 – скорость не лимитируется'
+    END AS formula_with_values
+
+FROM settings;
+```
+
+### максимальная скорость чтения с диска при AUTOVACUUM-ах, исходя из текущих настроек
+```sql
+--максимальная скорость записи на диск при автовакууме, исходя из текущих настроек
+WITH settings AS (
+    SELECT
+        (current_setting('block_size'))::int AS block_size,
+        (current_setting('autovacuum_vacuum_cost_limit'))::numeric AS cost_limit,
+        (current_setting('vacuum_cost_page_dirty'))::numeric AS cost_page_dirty,
+        substring(current_setting('autovacuum_vacuum_cost_delay') FROM '^(\d+(\.\d+)?)')::numeric AS cost_delay_ms
+)
+SELECT
+    block_size,
+    cost_limit,
+    cost_page_dirty,
+    cost_delay_ms,
+
+    -- Скорость записи (байт/с)
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            (cost_limit / cost_page_dirty * block_size) / (cost_delay_ms / 1000)
+        ELSE NULL
+    END AS write_rate_bytes_per_sec,
+
+    -- Скорость записи (МБ/с)
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            ((cost_limit / cost_page_dirty * block_size) / (cost_delay_ms / 1000)) / (1024 * 1024)
+        ELSE NULL
+    END AS write_rate_mb_per_sec,
+
+    -- Текст формулы (с именами переменных)
+    '(cost_limit / cost_page_dirty * block_size) / (cost_delay_ms / 1000)' AS formula_text,
+
+    -- Текст формулы с подставленными значениями
+    CASE
+        WHEN cost_delay_ms > 0 THEN
+            '(' || cost_limit || ' / ' || cost_page_dirty || ' * ' || block_size || ') / (' || cost_delay_ms || ' / 1000)'
+        ELSE
+            'cost_delay_ms <= 0 – скорость не лимитируется'
+    END AS formula_with_values
+
+FROM settings;
+```
+
 ### Сколько мертвых строк осталось нагенерить update-ами/delete-ами до запуска следующего автовакуума
 
 ```sql
