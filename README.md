@@ -3,6 +3,7 @@
 
 
 ### максимальная скорость чтения с диска при AUTOVACUUM-ах, исходя из текущих настроек
+основано на формулах из статьи https://pganalyze.com/docs/vacuum-advisor/how-does-the-vacuum-cost-model-work
 
 ```sql
 --максимальная скорость чтения, исходя из текущих настроек
