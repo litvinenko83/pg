@@ -145,7 +145,7 @@ SELECT
     stat.n_dead_tup::BIGINT as n_dead_tup,
     stat.last_autovacuum as last_autovacuum,
 --    stat.last_vacuum,
-    stat.last_autoanalyze as last_autovacuum,
+    stat.last_autoanalyze as last_autoanalyze,
 --    stat.last_analyze,
     cls.reltuples::BIGINT AS "оценка живых, строк",
     current_setting('autovacuum_vacuum_threshold')::bigint AS autovacuum_vacuum_threshold,
