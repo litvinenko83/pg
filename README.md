@@ -181,8 +181,8 @@ FROM
 JOIN
     pg_class cls ON stat.relid = cls.oid
 WHERE
-    stat.schemaname = 'public';
-    --AND stat.relname = '';
+    stat.schemaname = 'public'
+    AND stat.relname = 'goods';
 ```
 
 ### Проверка прогресса autovacuum
