@@ -2,6 +2,38 @@
 ## полезные запросы Postgres
 
 
+### SQL-запрос для вывода всех индексов (основной таблицы и её TOAST-таблицы)
+```sql
+-- индексы основной таблицы
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    i.relname AS index_name,
+    pg_get_indexdef(i.oid) AS index_def,
+    idx.indisvalid AS is_valid
+FROM pg_class i
+JOIN pg_index idx ON i.oid = idx.indexrelid
+JOIN pg_class c ON idx.indrelid = c.oid
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.oid = 'public.goods_sell_2602'::regclass
+
+UNION ALL
+
+-- индексы TOAST-таблицы
+SELECT
+    n.nspname AS schema_name,
+    c.relname AS table_name,
+    i.relname AS index_name,
+    pg_get_indexdef(i.oid) AS index_def,
+    idx.indisvalid AS is_valid
+FROM pg_class i
+JOIN pg_index idx ON i.oid = idx.indexrelid
+JOIN pg_class c ON idx.indrelid = c.oid
+JOIN pg_namespace n ON c.relnamespace = n.oid
+WHERE c.oid = (SELECT reltoastrelid FROM pg_class WHERE oid = 'public.goods_sell_2602'::regclass);
+```
+
+
 ### просмотр статуса физической репликации на лидере (запрос в Postgresql 12 точно работает)
 
 ```sql
