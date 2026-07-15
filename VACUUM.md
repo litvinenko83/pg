@@ -1,3 +1,15 @@
+### AUTOVACUUM когда срабатывает
+
+*https://habr.com/ru/companies/postgrespro/articles/452762/*
+
+```sql
+--условие запуска автовакуум 
+pg_stat_all_tables.n_dead_tup >= autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor * pg_class.reltupes 
+
+--условие запуска аналайза 
+pg_stat_all_tables.n_mod_since_analyze >= autovacuum_analyze_threshold + autovacuum_analyze_scale_factor * pg_class.reltupes 
+```
+
 ### максимальная скорость чтения с диска при AUTOVACUUM-ах, исходя из текущих настроек
 основано на формулах из статьи https://pganalyze.com/docs/vacuum-advisor/how-does-the-vacuum-cost-model-work
 
