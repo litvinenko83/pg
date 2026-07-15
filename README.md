@@ -1,6 +1,14 @@
 # pg
 ## полезные запросы Postgres
 
+### размер всех БД на инстансе
+```sql
+SELECT 
+    datname AS database_name,
+    pg_size_pretty(pg_database_size(datname)) AS database_size
+FROM pg_database
+ORDER BY pg_database_size(datname) DESC;
+```
 
 ### SQL-запрос для вывода всех индексов (основной таблицы и её TOAST-таблицы)
 ```sql
