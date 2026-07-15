@@ -39,4 +39,25 @@ SELECT
 FROM pg_stat_wal_receiver;
 ```
 
+### Размер WAL
 
+```sql
+SELECT pg_size_pretty(SUM(size)) AS total_wal_size 
+FROM pg_ls_waldir();
+```
+
+
+### Отставание репликации
+
+```sql
+SELECT
+    client_addr,
+    state,
+    sent_lsn,
+    write_lsn,
+    flush_lsn,
+    replay_lsn,
+    pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS replication_lag
+FROM
+    pg_stat_replication;
+```
