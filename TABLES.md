@@ -32,7 +32,7 @@ LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE relkind = 'r' 
 ) a 
 ) a 
-WHERE table_schema != 'public' 
+WHERE table_schema = 'public' 
 ORDER BY total_bytes DESC; 
 ```
 *http://www.gilev.ru/sizetablepostgre/*
@@ -52,7 +52,7 @@ n_live_tup::float)::numeric, 4) END AS dead_tup_ratio,
 last_autovacuum, 
 last_autoanalyze 
 from pg_stat_user_tables 
-WHERE schemaname not in ('public') 
+WHERE schemaname in ('public') 
 order by dead_tup_ratio desc NULLS LAST; 
 ```
 
