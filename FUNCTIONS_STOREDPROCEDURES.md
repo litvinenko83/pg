@@ -12,6 +12,19 @@ WHERE
     pp.prosrc ILIKE '%shkfor%'; 
 ```
 
+
+### кто владелец ХП
+
+```sql
+SELECT
+    r.rolname AS owner_name,
+    p.prosecdef AS is_security_definer
+FROM pg_proc p
+JOIN pg_roles r ON p.proowner = r.oid
+WHERE p.proname = 'create_daily_partitions';
+```
+
+
 ### Update JSON
 ```sql
 update the_table 
