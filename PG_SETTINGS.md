@@ -1,5 +1,6 @@
 ### запрос для бысрой выборки параметров pg (сравнивал параметры PROD и STAGE), которые могут повлиять на поведение SELECT/INSERT/UPDATE при нагрузочном тестировании
 
+```sql
 SELECT
     name,
     setting,
@@ -64,3 +65,4 @@ WHERE name IN (
     'constraint_exclusion'
 )
 ORDER BY name;
+```
