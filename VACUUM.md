@@ -10,6 +10,37 @@ pg_stat_all_tables.n_dead_tup >= autovacuum_vacuum_threshold + autovacuum_vacuum
 pg_stat_all_tables.n_mod_since_analyze >= autovacuum_analyze_threshold + autovacuum_analyze_scale_factor * pg_class.reltupes 
 ```
 
+### схематично увидеть заполненность блоков от начала к концу файла, мы можем сгруппировать блоки по "стратам" (например, разбив файл на 10 частей)
+
+```sql
+WITH page_map AS (
+    SELECT 
+        blkno,
+        avail,
+        max(blkno) OVER () as max_blk
+    FROM pg_freespace('card_part_5')
+),
+buckets AS (
+    SELECT 
+        blkno,
+        avail,
+        -- Разбиваем файл на 10 равных частей (10% файла каждая)
+        ntile(10) OVER (ORDER BY blkno) as bucket
+    FROM page_map
+)
+SELECT 
+    bucket as "Часть файла (1-Начало, 10-Конец)",
+    min(blkno) || ' - ' || max(blkno) as "Диапазон блоков",
+    count(*) as "Всего блоков",
+    sum(CASE WHEN avail > 8000 THEN 1 ELSE 0 END) as "Полностью пустых",
+    round(sum(CASE WHEN avail > 8000 THEN 1 ELSE 0 END)::numeric / count(*) * 100, 1) as "% пустых",
+    -- Схематичный бар свободного места
+    rpad('', (sum(avail) / (count(*) * 8192.0) * 20)::int, '█') as "График Bloat"
+FROM buckets
+GROUP BY bucket
+ORDER BY bucket;
+```
+
 ### максимальная скорость чтения с диска при AUTOVACUUM-ах, исходя из текущих настроек
 основано на формулах из статьи https://pganalyze.com/docs/vacuum-advisor/how-does-the-vacuum-cost-model-work
 
