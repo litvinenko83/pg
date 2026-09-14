@@ -13,12 +13,14 @@ pg_stat_all_tables.n_mod_since_analyze >= autovacuum_analyze_threshold + autovac
 ### схематично увидеть заполненность блоков от начала к концу файла, мы можем сгруппировать блоки по "стратам" (например, разбив файл на 10 частей)
 
 ```sql
+CREATE EXTENSION pg_freespacemap;
+
 WITH page_map AS (
     SELECT 
         blkno,
         avail,
         max(blkno) OVER () as max_blk
-    FROM pg_freespace('card_part_5')
+    FROM pg_freespace('goods')
 ),
 buckets AS (
     SELECT 
