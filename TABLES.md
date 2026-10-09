@@ -1,3 +1,45 @@
+### размер блоата по оценке аналогичной той, которую делает pgcompacttable , только в 10 раз шустрее (за счет использования pgstattuple_approx)
+
+```sql
+SELECT table_name,
+       pg_size_pretty(relation_size + toast_relation_size) AS total_size,
+       round(approx_free_percent::numeric, 2)              AS approx_free_percent,
+       round(dead_tuple_percent::numeric, 2)               AS dead_tuple_percent,
+       round(fillfactor::numeric, 0)                       AS fillfactor,
+       -- ЭТО колонка, эквивалентная free_percent в pgcompacttable:
+       greatest(round(
+           (100 * (1 - (100 - approx_free_percent - dead_tuple_percent) / fillfactor))::numeric, 2
+       ), 0)                                               AS pgcompact_free_percent,
+       -- и сразу решение о пропуске:
+       CASE WHEN greatest(round(
+                (100 * (1 - (100 - approx_free_percent - dead_tuple_percent) / fillfactor))::numeric, 2
+            ), 0) > 20
+            THEN 'process'
+            ELSE 'skip (<20%)'
+       END                                                 AS verdict
+FROM (
+    SELECT
+        (CASE WHEN n.nspname = 'public' THEN format('%I', c.relname)
+              ELSE format('%I.%I', n.nspname, c.relname) END) AS table_name,
+        (SELECT approx_free_percent FROM pgstattuple_approx(c.oid)) AS approx_free_percent,
+        (SELECT dead_tuple_percent FROM pgstattuple_approx(c.oid))  AS dead_tuple_percent,
+        pg_relation_size(c.oid) AS relation_size,
+        coalesce(pg_relation_size(c.reltoastrelid), 0) AS toast_relation_size,
+        coalesce(substring(array_to_string(c.reloptions, ' ') FROM 'fillfactor=([0-9]+)')::smallint, 100) AS fillfactor
+    FROM pg_class c
+    LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+      AND nspname !~ '^pg_toast' AND nspname !~ '^pg_temp'
+      AND relkind IN ('r', 'm')
+      AND relname = 'goods'
+) t;
+
+ table_name | total_size | approx_free_percent | dead_tuple_percent | fillfactor | pgcompact_free_percent |   verdict
+------------+------------+---------------------+--------------------+------------+------------------------+-------------
+ goods      | 120 GB     |                6.81 |               0.00 |        100 |                   6.81 | skip (<20%)
+```
+
+
 ### размер всех БД на инстансе
 ```sql
 SELECT 
