@@ -1,3 +1,15 @@
+### запрос к лидеру по статусу наливки реплики (reinit например)
+
+```sql
+SELECT 
+    pid, 
+    phase, 
+    pg_size_pretty(backup_streamed) AS streamed, 
+    pg_size_pretty(backup_total) AS total,
+    round(100.0 * backup_streamed / nullif(backup_total, 0), 1) AS pct
+FROM pg_stat_progress_basebackup;
+```
+
 ### просмотр статуса физической репликации на лидере (запрос в Postgresql 12 точно работает)
 
 ```sql
