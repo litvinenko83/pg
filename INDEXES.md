@@ -134,7 +134,7 @@ detail_rows AS (
         0                                                   AS sort_group,
         ts.size_bucket,
         ts.bloat_heap_ratio,
-        concat('SET max_parallel_maintenance_workers = 0; SET lock_timeout = '15s'; REINDEX INDEX CONCURRENTLY ',
+        concat('SET max_parallel_maintenance_workers = 0; SET lock_timeout = ''15s''; REINDEX INDEX CONCURRENTLY ',
                quote_ident(rb.nspname), '.', quote_ident(rb.index_name), ';')::text
                                                             AS concat,
         rb.dbname::text                                     AS database_name,
