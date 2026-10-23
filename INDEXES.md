@@ -1,47 +1,57 @@
-### блоат индексов - подправленный с LEFT JOIN-ами
+### блоат индексов - подправленный с LEFT JOIN-ами с сортировкой в порядке выгоды и безопасности REINDEX
+### в условиях дефицита места на ФС и времени на его освобождение дешевле и быстрее выполнить перестроения на небольших таблицах сначала
 ```sql
-WITH btree_index_atts AS (
+WITH big_tables AS (
+    SELECT
+        c.oid                            AS table_oid,
+        c.relname                        AS table_name,
+        n.nspname                        AS schema_name,
+        pg_relation_size(c.oid)          AS heap_bytes
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r','m')
+      AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
+      AND pg_relation_size(c.oid) >= 10::bigint * 1024 * 1024 * 1024
+),
+btree_index_atts AS (
     SELECT
         n.nspname,
-        ic.relname AS index_name,
+        ic.relname                                     AS index_name,
         ic.reltuples,
         ic.relpages,
         i.indrelid,
         i.indexrelid,
         ic.relam,
-        tc.relname AS tablename,
-        gs.pos                                          AS position,
-        (i.indkey::smallint[])[gs.pos]                  AS attnum,
-        i.indexrelid                                    AS index_oid
-    FROM pg_index i
+        tc.relname                                     AS tablename,
+        bt.heap_bytes,
+        bt.table_oid                                   AS bt_table_oid,
+        gs.pos                                         AS position,
+        (i.indkey::smallint[])[gs.pos]                 AS attnum,
+        i.indexrelid                                   AS index_oid
+    FROM big_tables bt
+    JOIN pg_index     i  ON i.indrelid   = bt.table_oid
     JOIN pg_class     ic ON i.indexrelid = ic.oid
     JOIN pg_class     tc ON i.indrelid   = tc.oid
     JOIN pg_namespace n  ON n.oid        = ic.relnamespace
     JOIN pg_am        am ON ic.relam     = am.oid
     CROSS JOIN LATERAL generate_subscripts(i.indkey::smallint[], 1) AS gs(pos)
     WHERE am.amname = 'btree'
-      AND n.nspname NOT IN ('pg_catalog','information_schema')
       AND ic.reltuples >= 0
 ),
 index_item_sizes AS (
     SELECT
-        ind.nspname,
-        ind.index_name,
-        ind.reltuples,
-        ind.relpages,
-        ind.relam,
+        ind.nspname, ind.index_name, ind.reltuples, ind.relpages, ind.relam,
         ind.indrelid                                AS table_oid,
         ind.index_oid,
+        ind.heap_bytes,
         current_setting('block_size')::numeric      AS bs,
         8                                           AS maxalign,
         24                                          AS pagehdr,
         CASE WHEN max(coalesce(st.null_frac, 0)) = 0 THEN 2 ELSE 6 END AS index_tuple_hdr,
         sum(
             (1 - coalesce(st.null_frac, 0)) *
-            coalesce(
-                st.avg_width,
-                CASE WHEN a.attlen > 0 THEN a.attlen ELSE 32 END
-            )
+            coalesce(st.avg_width,
+                     CASE WHEN a.attlen > 0 THEN a.attlen ELSE 32 END)
         ) AS nulldatawidth
     FROM btree_index_atts AS ind
     LEFT JOIN pg_attribute a
@@ -53,83 +63,138 @@ index_item_sizes AS (
           AND st.tablename  = ind.tablename
           AND st.attname    = pg_get_indexdef(ind.indexrelid, ind.position, TRUE)
     GROUP BY ind.nspname, ind.index_name, ind.reltuples, ind.relpages, ind.relam,
-             ind.indrelid, ind.index_oid,
+             ind.indrelid, ind.index_oid, ind.heap_bytes,
              current_setting('block_size')::numeric
 ),
 index_aligned_est AS (
     SELECT maxalign, bs, nspname, index_name, reltuples,
-        relpages, relam, table_oid, index_oid,
-        coalesce (
-            ceil (
-                reltuples * ( 6 + maxalign
-                    - CASE WHEN index_tuple_hdr%maxalign = 0 THEN maxalign ELSE index_tuple_hdr%maxalign END
-                    + nulldatawidth + maxalign
-                    - CASE WHEN nulldatawidth::integer%maxalign = 0 THEN maxalign ELSE nulldatawidth::integer%maxalign END
-                )::numeric / ( bs - pagehdr::NUMERIC ) + 1 )
-         , 0 ) AS expected
+        relpages, relam, table_oid, index_oid, heap_bytes,
+        coalesce(
+            ceil(reltuples * (
+                6 + maxalign
+                - CASE WHEN index_tuple_hdr % maxalign = 0 THEN maxalign ELSE index_tuple_hdr % maxalign END
+                + nulldatawidth + maxalign
+                - CASE WHEN nulldatawidth::integer % maxalign = 0 THEN maxalign ELSE nulldatawidth::integer % maxalign END
+            )::numeric / (bs - pagehdr::numeric) + 1),
+            0
+        ) AS expected
     FROM index_item_sizes
 ),
 raw_bloat AS (
-    SELECT current_database() AS dbname, nspname, pg_class.relname AS table_name, index_name,
-        bs*(index_aligned_est.relpages)::bigint AS totalbytes,
-        expected,
-        CASE WHEN index_aligned_est.relpages <= expected THEN 0
-             ELSE bs*(index_aligned_est.relpages-expected)::bigint
-        END AS wastedbytes,
-        CASE WHEN index_aligned_est.relpages <= expected THEN 0
-             ELSE bs*(index_aligned_est.relpages-expected)::bigint * 100
-                  / (bs*(index_aligned_est.relpages)::bigint)
-        END AS realbloat,
-        pg_relation_size(index_aligned_est.table_oid) AS table_bytes,
-        COALESCE(stat.idx_scan, 0) AS index_scans
-    FROM index_aligned_est
-    JOIN pg_class ON pg_class.oid = index_aligned_est.table_oid
-    LEFT JOIN pg_stat_user_indexes AS stat ON index_aligned_est.index_oid = stat.indexrelid
+    SELECT
+        current_database()                                 AS dbname,
+        iae.nspname,
+        pc.relname                                         AS table_name,
+        iae.index_name,
+        iae.table_oid,
+        iae.bs * iae.relpages::bigint                      AS totalbytes,
+        CASE WHEN iae.relpages <= iae.expected THEN 0
+             ELSE iae.bs * (iae.relpages - iae.expected)::bigint
+        END                                                AS wastedbytes,
+        CASE WHEN iae.relpages <= iae.expected THEN 0
+             ELSE iae.bs * (iae.relpages - iae.expected)::bigint * 100
+                  / (iae.bs * iae.relpages::bigint)
+        END                                                AS realbloat,
+        iae.heap_bytes,
+        COALESCE(stat.idx_scan, 0)                         AS index_scans
+    FROM index_aligned_est iae
+    JOIN pg_class pc ON pc.oid = iae.table_oid
+    LEFT JOIN pg_stat_user_indexes stat ON iae.index_oid = stat.indexrelid
 ),
-format_bloat AS (
-    SELECT dbname AS database_name, nspname AS schema_name, table_name, index_name,
-        round(realbloat) AS bloat_pct,
-        round(wastedbytes/(1024^2)::NUMERIC) AS bloat_mb,
-        round(totalbytes/(1024^2)::NUMERIC,3) AS index_mb,
-        round(table_bytes/(1024^2)::NUMERIC,3) AS table_mb,
-        index_scans
-    FROM raw_bloat
+table_summary AS (
+    SELECT
+        rb.table_oid,
+        min(rb.table_name)                                  AS table_name,
+        min(rb.nspname)                                     AS schema_name,
+        min(rb.dbname)                                      AS database_name,
+        max(rb.heap_bytes)                                  AS heap_bytes,
+        count(*)                                            AS n_indexes,
+        sum(rb.totalbytes)                                  AS total_index_bytes,
+        sum(rb.wastedbytes)                                 AS total_bloat_bytes,
+        max(rb.totalbytes)                                  AS max_index_bytes,
+        sum(rb.index_scans)                                 AS total_scans,
+        sum(rb.wastedbytes)::numeric
+            / NULLIF(max(rb.heap_bytes), 0)                 AS bloat_heap_ratio,
+        sum(rb.wastedbytes)::numeric
+            / NULLIF(max(rb.heap_bytes) * count(*) + sum(rb.totalbytes), 0)
+                                                            AS bloat_work_ratio,
+        CASE
+            WHEN max(rb.heap_bytes) <  50::bigint * 1024 * 1024 * 1024 THEN 1
+            WHEN max(rb.heap_bytes) < 200::bigint * 1024 * 1024 * 1024 THEN 2
+            ELSE 3
+        END                                                 AS size_bucket
+    FROM raw_bloat rb
+    GROUP BY rb.table_oid
+    HAVING sum(rb.wastedbytes) >= 1::bigint * 1024 * 1024 * 1024
+       AND sum(rb.wastedbytes)::numeric
+           / NULLIF(sum(rb.totalbytes), 0) >= 0.20
 ),
 detail_rows AS (
-    SELECT 0 AS sort_group,
-           concat('REINDEX INDEX CONCURRENTLY ', schema_name, '.', index_name, ';')::text AS concat,
-           database_name::text, schema_name::text, table_name::text, index_name::text,
-           bloat_pct,
-           bloat_mb,
-           index_mb,
-           table_mb,
-           index_scans
-    FROM format_bloat
-    WHERE table_name = 'goods'
+    SELECT
+        0                                                   AS sort_group,
+        ts.size_bucket,
+        ts.bloat_heap_ratio,
+        concat('REINDEX INDEX CONCURRENTLY ',
+               quote_ident(rb.nspname), '.', quote_ident(rb.index_name), ';')::text
+                                                            AS concat,
+        rb.dbname::text                                     AS database_name,
+        rb.nspname::text                                    AS schema_name,
+        rb.table_name::text                                 AS table_name,
+        rb.index_name::text                                 AS index_name,
+        round(rb.realbloat)                                 AS bloat_pct,
+        round(rb.wastedbytes / (1024^2)::numeric)           AS bloat_mb,
+        round(rb.totalbytes  / (1024^2)::numeric, 3)        AS index_mb,
+        round(rb.heap_bytes  / (1024^2)::numeric, 3)        AS table_mb,
+        NULL::numeric                                       AS max_index_mb,
+        rb.index_scans
+    FROM raw_bloat rb
+    JOIN table_summary ts ON ts.table_oid = rb.table_oid
 ),
-total_row AS (
-    SELECT 1 AS sort_group,
-           'ИТОГО по goods'::text             AS concat,
-           NULL::text                         AS database_name,
-           NULL::text                         AS schema_name,
-           NULL::text                         AS table_name,
-           NULL::text                         AS index_name,
-           NULL::numeric                      AS bloat_pct,
-           sum(bloat_mb)                      AS bloat_mb,
-           sum(index_mb)                      AS index_mb,
-           NULL::numeric                      AS table_mb,
-           sum(index_scans)                   AS index_scans
-    FROM format_bloat
-    WHERE table_name = 'goods'
+total_per_table AS (
+    SELECT
+        1                                                   AS sort_group,
+        ts.size_bucket,
+        ts.bloat_heap_ratio,
+        format('ИТОГО %s.%s: heap=%s МБ, индексов=%s, Σ блоат=%s МБ, max(idx)=%s МБ, блоат/heap=%s, блоат/работу=%s',
+               ts.schema_name, ts.table_name,
+               round(ts.heap_bytes        / (1024^2)::numeric),
+               ts.n_indexes,
+               round(ts.total_bloat_bytes / (1024^2)::numeric),
+               round(ts.max_index_bytes   / (1024^2)::numeric),
+               round(ts.bloat_heap_ratio, 3),
+               round(ts.bloat_work_ratio, 3))::text         AS concat,
+        ts.database_name::text                              AS database_name,
+        ts.schema_name::text                                AS schema_name,
+        ts.table_name::text                                 AS table_name,
+        NULL::text                                          AS index_name,
+        NULL::numeric                                       AS bloat_pct,
+        round(ts.total_bloat_bytes / (1024^2)::numeric)     AS bloat_mb,
+        round(ts.total_index_bytes / (1024^2)::numeric, 3)  AS index_mb,
+        round(ts.heap_bytes        / (1024^2)::numeric, 3)  AS table_mb,
+        round(ts.max_index_bytes   / (1024^2)::numeric, 3)  AS max_index_mb,
+        ts.total_scans                                      AS index_scans
+    FROM table_summary ts
 )
 SELECT concat, database_name, schema_name, table_name, index_name,
-       bloat_pct, bloat_mb, index_mb, table_mb, index_scans
+       size_bucket, bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb,
+       index_scans,
+       round(bloat_heap_ratio, 3) AS bloat_heap_ratio
 FROM (
-    SELECT * FROM detail_rows
+    SELECT sort_group, size_bucket, bloat_heap_ratio, concat,
+           database_name, schema_name, table_name, index_name,
+           bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb, index_scans
+    FROM detail_rows
     UNION ALL
-    SELECT * FROM total_row
+    SELECT sort_group, size_bucket, bloat_heap_ratio, concat,
+           database_name, schema_name, table_name, index_name,
+           bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb, index_scans
+    FROM total_per_table
 ) t
-ORDER BY sort_group, bloat_pct DESC NULLS LAST;
+ORDER BY t.size_bucket,
+         t.bloat_heap_ratio DESC NULLS LAST,
+         t.schema_name, t.table_name,
+         t.sort_group DESC,
+         t.bloat_mb DESC;
 ```
 
 ### SQL-запрос для вывода всех индексов (основной таблицы и её TOAST-таблицы)
