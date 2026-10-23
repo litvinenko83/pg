@@ -11,7 +11,7 @@ WITH big_tables AS (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r','m')
       AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
-      AND pg_relation_size(c.oid) >= 10::bigint * 1024 * 1024 * 1024  --таблицы, куча heap которых больше 10Гб
+      AND pg_relation_size(c.oid) >= 10::bigint * 1024 * 1024 * 1024
 ),
 btree_index_atts AS (
     SELECT
@@ -174,6 +174,34 @@ total_per_table AS (
         round(ts.max_index_bytes   / (1024^2)::numeric, 3)  AS max_index_mb,
         ts.total_scans                                      AS index_scans
     FROM table_summary ts
+),
+grand_total AS (
+    SELECT
+        2                                                   AS sort_group,
+        999                                                 AS size_bucket,
+        sum(ts.total_bloat_bytes)::numeric
+            / NULLIF(sum(ts.heap_bytes), 0)                 AS bloat_heap_ratio,
+        format('ВСЕГО: таблиц=%s, индексов=%s, Σ heap=%s МБ, Σ индексы=%s МБ, Σ блоат=%s МБ, max(idx)=%s МБ, Σ блоат/Σ heap=%s',
+               count(*),
+               sum(ts.n_indexes),
+               round(sum(ts.heap_bytes)        / (1024^2)::numeric),
+               round(sum(ts.total_index_bytes) / (1024^2)::numeric),
+               round(sum(ts.total_bloat_bytes) / (1024^2)::numeric),
+               round(max(ts.max_index_bytes)   / (1024^2)::numeric),
+               round(sum(ts.total_bloat_bytes)::numeric
+                     / NULLIF(sum(ts.heap_bytes), 0), 3))::text
+                                                            AS concat,
+        min(ts.database_name)::text                         AS database_name,
+        NULL::text                                          AS schema_name,
+        NULL::text                                          AS table_name,
+        NULL::text                                          AS index_name,
+        NULL::numeric                                       AS bloat_pct,
+        round(sum(ts.total_bloat_bytes) / (1024^2)::numeric)      AS bloat_mb,
+        round(sum(ts.total_index_bytes) / (1024^2)::numeric, 3)   AS index_mb,
+        round(sum(ts.heap_bytes)        / (1024^2)::numeric, 3)   AS table_mb,
+        round(max(ts.max_index_bytes)   / (1024^2)::numeric, 3)   AS max_index_mb,
+        sum(ts.total_scans)                                 AS index_scans
+    FROM table_summary ts
 )
 SELECT concat, database_name, schema_name, table_name, index_name,
        size_bucket, bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb,
@@ -189,6 +217,11 @@ FROM (
            database_name, schema_name, table_name, index_name,
            bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb, index_scans
     FROM total_per_table
+    UNION ALL
+    SELECT sort_group, size_bucket, bloat_heap_ratio, concat,
+           database_name, schema_name, table_name, index_name,
+           bloat_pct, bloat_mb, index_mb, table_mb, max_index_mb, index_scans
+    FROM grand_total
 ) t
 ORDER BY t.size_bucket,
          t.bloat_heap_ratio DESC NULLS LAST,
