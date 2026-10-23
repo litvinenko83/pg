@@ -11,7 +11,7 @@ WITH big_tables AS (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.relkind IN ('r','m')
       AND n.nspname NOT IN ('pg_catalog','information_schema','pg_toast')
-      AND pg_relation_size(c.oid) >= 10::bigint * 1024 * 1024 * 1024
+      AND pg_relation_size(c.oid) >= 10::bigint * 1024 * 1024 * 1024  --таблицы, куча heap которых больше 10Гб
 ),
 btree_index_atts AS (
     SELECT
